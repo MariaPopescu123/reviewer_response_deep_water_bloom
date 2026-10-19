@@ -1,0 +1,71 @@
+#Maria Popescu
+
+#This script:
+# 1. Calculates daily buoyancy frequency profiles from temp_depths_interp
+# 2. Matches each phyto-cast Date to the nearest buoyancy Date (within 7 days)
+# 3. Extracts buoyancy frequency at the DCM depth for each phyto cast
+# 4. Exports final_buoyancy for the joined RF dataset
+#
+# Inputs:
+# - temp_depths_interp (created in 04_photic_temp_thermo.R)
+# - final_phytos (created in 02_Phytos_dataframe.R)
+#
+# Outputs:
+# - CSV: CSVs/final_buoyancy.csv
+#
+# Dependencies:
+# - Run after 01_DataDownload.R, 02_Phytos_dataframe.R, and 04_photic_temp_thermo.R
+#   in the same R session.
+
+required_objects <- c("temp_depths_interp", "final_phytos")
+missing_objects <- required_objects[!vapply(required_objects, exists, logical(1), inherits = TRUE)]
+if (length(missing_objects) > 0) {
+  stop("Missing required objects for 05_buoyancy_freq.R: ",
+       paste(missing_objects, collapse = ", "),
+       ". Run 01_DataDownload.R, 02_Phytos_dataframe.R, and 04_photic_temp_thermo.R first.")
+}
+
+library(data.table)
+
+####Buoyancy Frequency ####
+buoyancy_frame <- temp_depths_interp|> #temp_depths_interp was loaded in from 04_photic_temp_thermo
+  group_by(Date) |>
+  mutate(buoyancy_freq = c(buoyancy.freq(Temp_C, Depth_m), NA))|>#added for padding for the last value
+  ungroup() |>
+  select(Date, buoyancy_freq, Depth_m)|>
+  filter(!is.na(buoyancy_freq))
+
+
+# Get the unique dates available in buoyancy_frame (one row per date)
+buoyancy_dates <- buoyancy_frame |>
+  distinct(Date) |>
+  arrange(Date)
+
+# For each final_phytos Date, find the nearest buoyancy Date (either direction)
+phytos_dt <- as.data.table(final_phytos)
+buoy_dates_dt <- as.data.table(buoyancy_dates)
+
+phytos_dt[, Date := as.Date(Date)]
+buoy_dates_dt[, Date := as.Date(Date)]
+buoy_dates_dt[, buoyancy_Date := Date]   # stash before the rolling join overwrites
+
+setkey(buoy_dates_dt, Date)
+setkey(phytos_dt, Date)
+
+phytos_with_buoy_date <- buoy_dates_dt[phytos_dt, on = "Date", roll = "nearest"] |>
+  as_tibble()
+# phytos_with_buoy_date now has: Year, Week, Date (phyto date), DCM_depth, max_conc, buoyancy_Date
+
+# Pull all buoyancy measurements for the matched dates, then within each
+# (phyto Date, buoyancy_Date) pair, pick the depth closest to DCM_depth
+final_buoyancy <- phytos_with_buoy_date |>
+  left_join(buoyancy_frame, by = c("buoyancy_Date" = "Date"), relationship = "many-to-many")|>
+  group_by(Date) |>     # group by phyto Date — one final row per phyto observation
+  slice_min(abs(Depth_m - DCM_depth), n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(date_gap = as.numeric(abs(Date - buoyancy_Date))) |>
+  select(Year, Date, DCM_depth, N_at_DCM = buoyancy_freq, date_gap)|>
+  filter(date_gap < 7)|>
+  select(Date, N_at_DCM)
+
+write.csv(final_buoyancy, "CSVs/final_buoyancy.csv", row.names = FALSE)

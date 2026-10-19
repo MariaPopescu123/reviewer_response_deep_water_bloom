@@ -1,0 +1,86 @@
+#Maria Popescu
+
+#this script:
+# 1. calculates schmidt stability for BVR across all years
+# 2. provides a diagnostic plot to visualize schmidt stability
+# 3. makes a dataframe (final_schmidt) that will be used in final analysis
+# 4. calculates statistics included in the paper
+#
+# Inputs expected in the workspace from prior scripts:
+# - bath (from 01_DataDownload.R)
+# - temp_depths_interp (from 04_photic_temp_thermo.R)
+# - water_level (from 01_water_level.R)
+# Output written: CSVs/final_schmidt.csv
+
+required_objects <- c("bath", "temp_depths_interp", "water_level")
+missing_objects <- required_objects[!vapply(required_objects, exists, logical(1), inherits = TRUE)]
+if (length(missing_objects) > 0) {
+  stop("Missing required objects for 07_schmidt_stability.R: ",
+       paste(missing_objects, collapse = ", "),
+       ". Run 01_DataDownload.R, 01_water_level.R, and 04_photic_temp_thermo.R first.")
+}
+
+
+#calculating schmidt stability 
+BVRbath <- bath|>
+  filter(Reservoir == "BVR")|>
+  select(Depth_m, SA_m2)
+
+
+# Prepare data frame
+daily_temp_profiles <- temp_depths_interp |>
+  mutate(
+    Year = year(Date),
+    RoundedDepth = round(Depth_m)  # Round to the nearest meter
+  ) |>
+  filter(DOY >= 133, DOY <= 286)|>
+  group_by(Date, RoundedDepth) |>
+  slice_min(abs(Depth_m - RoundedDepth), with_ties = FALSE) |>  # Select depth closest to that rounded meter
+  ungroup()|>
+  left_join(water_level |> distinct(Date, WaterLevel_m), by = "Date")|>
+  mutate(Date = as.Date(Date))
+
+
+# Need to make correction for different water levels and bathymetry.
+# Currently the Bath frame is 0-14. 
+# For each Date the max depth needs to be subtracted from 14. ex: BathDiff = 14 - max(Depth_m) [example: 2]
+# Then make a column called BathAdj = Roundeddepth + BathDiff
+# Then left join BVRbath to BathAdj
+
+new_bath <- daily_temp_profiles|>
+  group_by(Date)|>
+  mutate(BathDiff = 14 - max(RoundedDepth),
+         BathAdj = RoundedDepth + BathDiff)|>
+  ungroup()|>
+  left_join(BVRbath, by = c("BathAdj" = "Depth_m"))|>
+  select(-RoundedDepth, -WaterLevel_m, -BathDiff, -BathAdj)
+
+# Now we have different bathymetry for each Date
+# Let's calculate Schmidt stability:
+# Higher Schmidt stability → more energy needed to mix → stronger stratification
+# Lower Schmidt stability → less energy needed → weaker or no stratification
+
+schmidt_frame <- new_bath|>
+  group_by(Date)|>
+  filter(!is.na(Temp_C))|>
+  mutate(schmidt_stability = schmidt.stability(Temp_C, Depth_m, SA_m2, Depth_m))|>
+  ungroup()|>
+  group_by(Date, Year)|>
+  summarise(schmidt_stability = mean(schmidt_stability), .groups = "drop")
+
+final_schmidt <- schmidt_frame
+
+#diagnostic plot to visualize schmidt stability
+schmidt_plot <- ggplot(final_schmidt, aes(x = Date, y = schmidt_stability, color = factor(Year), group = Year)) +
+  geom_point() +
+  geom_line() +
+  labs(
+    x = "Date",
+    y = "Schmidt Stability (J/m²)",
+    color = "Year"
+  ) +
+  theme_minimal()
+schmidt_plot
+
+#this is the final dataframe that will be used in RF analysis
+write.csv(final_schmidt, here::here("CSVs", "final_schmidt.csv"), row.names = FALSE)

@@ -1,0 +1,425 @@
+#Maria Popescu
+
+#This script:
+#1. Makes heatmaps for phytoplankton 2014-2024 (Figure 2)
+#2. Makes figures displaying the profiles for the day of maximum 
+# phytoplankton concentration of each year (Figure 3)
+#3. Makes Profile Casts visualization with all spectral groups for the day of maximum 
+# phytoplankton concentration of each year SI Figure S3
+
+#
+# Inputs:
+# - water_level (created in 01_water_level.R)
+# - DCM_metrics_filtered (created in 02_Phytos_dataframe.R)
+#
+# Outputs:
+# - Heatmap and profile figures under Figs/Phytos_viz/.
+#
+# Dependencies:
+# - Run after 01_water_level.R and 02_Phytos_dataframe.R in the same session.
+
+required_objects <- c("water_level", "DCM_metrics_filtered")
+missing_objects <- required_objects[!vapply(required_objects, exists, logical(1), inherits = TRUE)]
+if (length(missing_objects) > 0) {
+  stop("Missing required objects for 03_Phytos_heatmaps_profiles.R: ",
+       paste(missing_objects, collapse = ", "),
+       ". Run 01_water_level.R and 02_Phytos_dataframe.R first.")
+}
+
+# packages loaded in 01_DataDownload.R
+
+#1. Heatmap for Figure 2 ####
+
+# 1) Make water_level unique per Date and keep only WL column
+wl_daily <- water_level %>%
+  distinct(Date, WaterLevel_m)
+
+# 2) Join water level, and keep phytoplankton concentration as NA if below reservoir depth (for when the FP hits the bottom of the reservoir)
+phytos_heatmaps <- DCM_metrics_filtered %>%
+  left_join(wl_daily, by = "Date") %>%
+  mutate(
+    TotalConc_ugL = ifelse(
+      Depth_m > WaterLevel_m, NA_real_, TotalConc_ugL
+    )
+  ) %>%
+  filter(!is.na(TotalConc_ugL))
+
+
+# 3) heatmap only framing the timeframe
+#we want to display water level
+#to help set the scale for the heatmap
+global_max_val <- DCM_metrics_filtered %>%
+  filter(Site == 50, Year >= 2015, Year <= 2024) %>%
+  summarise(max_val = max(TotalConc_ugL, na.rm = TRUE)) %>%
+  pull(max_val)
+
+#Function to make heatmaps for total phytoplankton concentration visualization across time and depth
+flora_heatmap <- function(
+    fp_data,
+    year,
+    site,
+    z,
+    unitz,
+    global_max,
+    show_legend = TRUE,
+    wl_col = "WaterLevel_m",
+    show_x_text = TRUE,   # show x tick labels (only wanted on bottom-row panels)
+    show_y_text = TRUE    # show y tick labels (only wanted on left-column panels)
+) {
+  # DOY window I want
+  doy_min <- 133
+  doy_max <- 286
+  
+  # build a year/site subset even if z is missing
+  base <- fp_data %>%
+    mutate(Date = as.Date(Date), DOY = lubridate::yday(Date)) %>%
+    filter(lubridate::year(Date) == year,
+           Site == site,
+           DOY >= doy_min,
+           DOY <= doy_max)
+  
+  # WL series
+  wl_daily <- if (nrow(base)) {
+    tmp <- base %>%
+      select(DOY, !!rlang::sym(wl_col)) %>%
+      rename(WL = !!rlang::sym(wl_col)) %>%
+      filter(is.finite(DOY), is.finite(WL)) %>%
+      group_by(DOY) %>%
+      summarise(WL = mean(WL), .groups = "drop")
+    
+    a <- approx(x = tmp$DOY, y = tmp$WL,
+                xout = seq(doy_min, doy_max), rule = 2)
+    tibble(DOY = a$x, WL = a$y)
+  } else tibble(DOY = numeric(), WL = numeric())
+  
+  # fixed depth extent
+  ymax_plot <- 12.5
+  
+  # interpolate z if available
+  have_z <- nrow(base) && any(is.finite(base[[z]]))
+  if (have_z) {
+    base_clean <- base %>%
+      filter(is.finite(DOY), is.finite(Depth_m), is.finite(.data[[z]]))
+    have_z <- nrow(base_clean) && any(is.finite(base_clean[[z]]))
+    
+    if (have_z) {
+      io <- suppressWarnings(
+        akima::interp(
+          x = base_clean$DOY,
+          y = base_clean$Depth_m,
+          z = base_clean[[z]],
+          duplicate = "mean", nx = 200, ny = 200
+        )
+      )
+      interp <- expand.grid(x = io$x, y = io$y)
+      interp$z <- as.vector(io$z)
+    } else {
+      interp <- tibble(x = numeric(), y = numeric(), z = numeric())
+    }
+  } else {
+    interp <- tibble(x = numeric(), y = numeric(), z = numeric())
+  }
+  
+  fig_title <- as.character(year)  # Year for each panel
+  
+  p <- ggplot() +
+    # heatmap
+    geom_raster(data = interp, aes(x = x, y = y, fill = z)) +
+    # gray below water level
+    geom_ribbon(data = wl_daily, inherit.aes = FALSE,
+                aes(x = DOY, ymin = WL, ymax = ymax_plot),
+                fill = "grey70") +
+    # water level line
+    geom_line(data = wl_daily, inherit.aes = FALSE,
+              aes(x = DOY, y = WL), color = "black", linewidth = 0.8) +
+    
+    scale_y_reverse(
+      expand = c(0, 0),
+      limits = c(ymax_plot, 0)
+    ) +
+    scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(doy_min, doy_max), #so we are looking at the time frame we want
+      breaks = seq(doy_min, doy_max, by = 30)
+    ) +
+    scale_fill_gradientn(
+      colours = c(colorRamps::blue2green2red(60), rep("black", 12)),
+      values = if (have_z) scales::rescale(c(0, 40, 80, 110, global_max)) else NULL,
+      limits = if (have_z) c(0, global_max) else NULL,
+      oob = scales::squish,
+      na.value = "grey70"
+    ) +
+    labs(x = "Day of Year", y = "Depth (m)", title = fig_title, fill = unitz) +
+    coord_cartesian(
+      xlim = c(doy_min, doy_max),
+      ylim = c(ymax_plot, 0),
+      expand = FALSE,
+      clip = "on"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      axis.text  = element_text(size = 8),
+      axis.title = element_text(size = 9),
+      plot.title = element_text(size = 9, margin = ggplot2::margin(b = 1)),
+      legend.text = element_text(size = 8),
+      legend.title = element_text(size = 9),
+      legend.key.size = unit(0.4, "cm"),
+      panel.background = element_rect(fill = "grey90", colour = NA),
+      plot.background  = element_rect(fill = "white",  colour = NA),
+      # tight vertical margins; wider horizontal gap so x tick labels on
+      # adjacent columns don't run into each other
+      plot.margin = ggplot2::margin(t = 1, r = 7, b = 1, l = 7)
+    )
+
+  if (!show_legend) p <- p + theme(legend.position = "none") #so I can optionally show a legend and only have one figure legend
+  # drop tick labels on interior panels: y only on the left column, x only on the bottom row
+  if (!show_x_text) p <- p + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  if (!show_y_text) p <- p + theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+  if (!have_z) p <- p + annotate("text", x = doy_min + 5, y = 0.5 * ymax_plot,
+                                 label = "(no data)", hjust = 0, size = 3)
+  
+  p
+}
+
+# Build all plots but only the last one keeps its legend.
+# Grid is row-major, ncol = 5:  row 1 = 2015-2019 (top), row 2 = 2020-2024 (bottom).
+# y tick labels only on the left column (2015, 2020); x tick labels only on the bottom row (2020-2024).
+plots <- list(
+  flora_heatmap(phytos_heatmaps, 2015, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = FALSE, show_y_text = TRUE),
+  flora_heatmap(phytos_heatmaps, 2016, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = FALSE, show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2017, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = FALSE, show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2018, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = FALSE, show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2019, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = FALSE, show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2020, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = TRUE,  show_y_text = TRUE),
+  flora_heatmap(phytos_heatmaps, 2021, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = TRUE,  show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2022, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = TRUE,  show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2023, 50, "TotalConc_ugL", "µg/L", global_max_val, FALSE, show_x_text = TRUE,  show_y_text = FALSE),
+  flora_heatmap(phytos_heatmaps, 2024, 50, "TotalConc_ugL", "µg/L", global_max_val, TRUE,  show_x_text = TRUE,  show_y_text = FALSE)   # only this keeps legend
+)
+
+# Combine with patchwork, collect legend and shared x/y axis titles
+final_with_legend <-
+  (plots[[1]] + plots[[2]] + plots[[3]] + plots[[4]] + plots[[5]] +
+     plots[[6]] + plots[[7]] + plots[[8]] + plots[[9]] + plots[[10]]) +
+  plot_layout(ncol = 5, guides = "collect", axis_titles = "collect") +
+  plot_annotation(theme = theme(legend.position = "right"))
+
+#### Main Manuscript Figure 2 ####
+suppressWarnings(
+  ggsave(
+    filename = "Figs/Phytos_viz/final_phytos_heatmap_plot.png",
+    plot = final_with_legend,
+    width = 9, height = 3.15, dpi = 900, bg = "white",
+    device = ragg::agg_png
+  )
+)
+# copy to corresponding figure folder
+suppressWarnings(
+  ggsave(
+    filename = "Figs/Main Manuscript/Figure2.png",
+    plot = final_with_legend,
+    width = 9, height = 3.15, dpi = 900, bg = "white",
+    device = ragg::agg_png
+  )
+)
+
+#2. Profile Casts for Figure 3####
+#this produces a 10-panel figure- each figure shows the profile 
+#for the day when maximum phytoplankton concentration
+#occurred each year
+
+# Clean FacetID: remove "BVR" from facet labels
+# Filter phytos for the years of interest
+phytos <- phytos %>%
+  filter(Year > 2014, Year < 2025)
+
+# Casts table
+casts <- phytos %>%
+  mutate(Date = date(DateTime)) %>%
+  select(Reservoir, Date, CastID, Site) %>%
+  distinct()
+
+# Max cast(s) per year
+max_phytos_annual <- phytos %>%
+  group_by(Year) %>%
+  filter(TotalConc_ugL == max(TotalConc_ugL, na.rm = TRUE)) %>%
+  ungroup()
+
+# Unique CastIDs for those max casts
+max_cast_ids <- unique(max_phytos_annual$CastID)
+
+# Filter casts to only max CastIDs (Site 50, Reservoir BVR)
+sample_dat <- casts %>%
+  filter(Reservoir == "BVR",
+         Site == 50,
+         CastID %in% max_cast_ids) %>%
+  mutate(Date = as.Date(Date))
+
+# Build plot_dat
+plot_dat <- phytos %>%
+  mutate(Date = date(DateTime)) %>%
+  filter(month(Date) != 1) %>%
+  group_by(Reservoir, Date, Site, CastID) %>%
+  # Create FacetID here
+  mutate(FacetID = paste(Reservoir, Date, sep = " ")) %>%
+  ungroup() %>%
+  semi_join(sample_dat, by = c("Reservoir", "Date", "CastID")) %>%
+  select(
+    CastID, FacetID,
+    TotalConc_ugL, Depth_m
+  ) %>%
+  pivot_longer(
+    cols = TotalConc_ugL,
+    names_to = "var",
+    values_to = "ugL"
+  ) %>%
+  mutate(var = recode(var, "TotalConc_ugL" = "Total Phytoplankton"))
+
+# Now remove "BVR" from facet labels
+plot_dat <- plot_dat %>%
+  mutate(FacetID = gsub("^BVR\\s+", "", FacetID))
+
+# Build the plot
+plot_casts <- ggplot(plot_dat, aes(x = ugL, y = Depth_m, group = var)) +
+  geom_path(aes(color = var)) +
+  scale_y_reverse() +
+  facet_wrap(
+    facets = vars(FacetID),
+    nrow = 2,
+    ncol = 5
+  ) +
+  xlab(expression("Phytoplankton magnitude (" * mu * "g/L)")) +
+  ylab("Depth (m)") +
+  scale_color_manual(
+    name = NULL,
+    values = c(
+      "Total Phytoplankton" = "black"
+    )
+  ) +
+  scale_size_manual(
+    values = c(
+      "Total Phytoplankton" = 0.8
+    ),
+    guide = "none"
+  ) +
+  scale_x_continuous(expand = expansion(mult = c(0.04, 0.10))) +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text = element_text(size = 7),
+    axis.text.x = element_text(margin = ggplot2::margin(t = 2)),
+    axis.title = element_text(size = 9, face = "bold"),
+    strip.text = element_text(size = 9, face = "bold"),
+    legend.position = "none",
+    panel.grid.major = element_line(color = "grey80", linewidth = .2),
+    panel.grid.minor = element_line(color = "grey90", linewidth = .1),
+    panel.spacing.x = unit(0.7, "cm"),
+    panel.spacing.y = unit(0.6, "cm"),
+    plot.margin = ggplot2::margin(t = 5, r = 25, b = 8, l = 5)
+  )
+
+suppressWarnings(print(plot_casts))
+
+#### Main Manuscript Figure 3 ####
+suppressWarnings(
+  ggsave("Figs/Phytos_viz/FP_casts_2025_just_totals.png",
+         plot = plot_casts,
+         width = 9, height = 4.85, units = "in",
+         dpi = 900)  # high-res
+)
+# copy to corresponding figure folder
+suppressWarnings(
+  ggsave("Figs/Main Manuscript/Figure3.png",
+         plot = plot_casts,
+         width = 9, height = 4.85, units = "in",
+         dpi = 900)
+)
+
+
+
+#3. Profile Casts with all spectral groups for SI Figure S3####
+# Reuses the same max-cast selection from section 2 but includes all pigment groups
+
+plot_dat_all <- phytos %>%
+  mutate(Date = date(DateTime)) %>%
+  filter(month(Date) != 1) %>%
+  group_by(Reservoir, Date, Site, CastID) %>%
+  mutate(FacetID = paste(Reservoir, Date, sep = " ")) %>%
+  ungroup() %>%
+  semi_join(sample_dat, by = c("Reservoir", "Date", "CastID")) %>%
+  select(
+    CastID, FacetID,
+    GreenAlgae_ugL, Bluegreens_ugL, BrownAlgae_ugL, MixedAlgae_ugL,
+    TotalConc_ugL, Depth_m
+  ) %>%
+  pivot_longer(
+    cols = GreenAlgae_ugL:TotalConc_ugL,
+    names_to = "var",
+    values_to = "ugL"
+  ) %>%
+  mutate(FacetID = gsub("^BVR\\s+", "", FacetID)) %>%
+  mutate(var = recode(var,
+    "GreenAlgae_ugL"  = "Green Algae",
+    "Bluegreens_ugL"  = "Cyanobacteria",
+    "BrownAlgae_ugL"  = "Brown Algae",
+    "MixedAlgae_ugL"  = "Mixed Algae",
+    "TotalConc_ugL"   = "Total Phytoplankton"
+  ))
+
+plot_casts_all <- ggplot(plot_dat_all, aes(x = ugL, y = Depth_m, group = var)) +
+  geom_path(aes(color = var)) +
+  scale_y_reverse() +
+  facet_wrap(
+    facets = vars(FacetID),
+    nrow = 2,
+    ncol = 5
+  ) +
+  xlab(expression("Phytoplankton magnitude (" * mu * "g/L)")) +
+  ylab("Depth (m)") +
+  scale_color_manual(
+    name = "Spectral Group",
+    values = c(
+      "Green Algae"        = "green3",
+      "Cyanobacteria"      = "blue",
+      "Brown Algae"        = "orange",
+      "Mixed Algae"        = "red",
+      "Total Phytoplankton" = "black"
+    )
+  ) +
+  scale_size_manual(
+    values = c(
+      "Green Algae"        = 0.5,
+      "Cyanobacteria"      = 0.5,
+      "Brown Algae"        = 0.5,
+      "Mixed Algae"        = 0.5,
+      "Total Phytoplankton" = 0.8
+    ),
+    guide = "none"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold"),
+    strip.text = element_text(size = 15, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 15, face = "bold"),
+    panel.grid.major = element_line(color = "grey80", linewidth = .2),
+    panel.grid.minor = element_line(color = "grey90", linewidth = .1),
+    panel.spacing = unit(1, "cm")
+  )
+
+suppressWarnings(print(plot_casts_all))
+
+#### Supporting Information Figure S3 ####
+suppressWarnings(
+  ggsave("Figs/Phytos_viz/FP_casts_2025.png",
+         plot = plot_casts_all,
+         width = 13, height = 7, units = "in",
+         dpi = 900)
+)
+# copy to corresponding figure folder
+suppressWarnings(
+  ggsave("Figs/Supporting Information/Figure S3.png",
+         plot = plot_casts_all,
+         width = 13, height = 7, units = "in",
+         dpi = 900)
+)
