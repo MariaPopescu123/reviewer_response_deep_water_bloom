@@ -1,7 +1,7 @@
 #joining all the dataframes together from the data wrangling file
 #
 # Inputs:
-# - Date-keyed CSV outputs from previous wrangling steps (01-08), with
+# - Date-keyed CSV outputs from previous wrangling steps (01-09), with
 #   final_phytos.csv (created in 02_Phytos_dataframe.R) as the spine.
 #
 # Outputs:
@@ -9,7 +9,7 @@
 # - CSV: CSVs/full_data.csv.
 #
 # Dependencies:
-# - Run after scripts 01-08 have finished successfully.
+# - Run after scripts 01-09 have finished successfully.
 
 required_csvs <- c(
   "CSVs/final_phytos.csv",
@@ -19,15 +19,16 @@ required_csvs <- c(
   "CSVs/final_buoyancy.csv",
   "CSVs/final_chem.csv",
   "CSVs/final_schmidt.csv",
+  "CSVs/final_wedderburn.csv",
   "CSVs/final_metdata.csv",
   "CSVs/temp_at_DCM.csv"
 )
 
 missing_csvs <- required_csvs[!file.exists(required_csvs)]
 if (length(missing_csvs) > 0) {
-  stop("Missing required CSV inputs for 09_join_all_frames.R: ",
+  stop("Missing required CSV inputs for 10_join_all_frames.R: ",
        paste(missing_csvs, collapse = ", "),
-       ". Run upstream scripts 01-08 first.")
+       ". Run upstream scripts 01-09 first.")
 }
 
 #read in CSVs (all keyed on Date). Strip columns from right-hand frames that
@@ -51,6 +52,9 @@ final_chem <- read_csv("CSVs/final_chem.csv") |>
 final_schmidt <- read_csv("CSVs/final_schmidt.csv") |>
   mutate(Date = as_date(Date)) |>
   select(-any_of("Year"))
+final_wedderburn <- read_csv("CSVs/final_wedderburn.csv") |>
+  mutate(Date = as_date(Date)) |>
+  select(Date, log_wedderburn)
 final_metdata <- read_csv("CSVs/final_metdata.csv") |>
   mutate(Date = as_date(Date))
 temp_at_DCM <- read_csv("CSVs/temp_at_DCM.csv") |>
@@ -63,6 +67,7 @@ full_data <- final_phytos %>%
   left_join(final_buoyancy,      by = "Date") %>%
   left_join(final_chem,          by = "Date") %>%
   left_join(final_schmidt,       by = "Date") %>%
+  left_join(final_wedderburn,    by = "Date") %>%
   left_join(final_metdata,       by = "Date") %>%
   left_join(temp_at_DCM,         by = "Date") |>
   mutate(DOY = yday(Date)) |>

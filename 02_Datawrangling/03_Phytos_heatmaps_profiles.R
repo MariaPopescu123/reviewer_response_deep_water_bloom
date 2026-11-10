@@ -423,3 +423,26 @@ suppressWarnings(
          width = 13, height = 7, units = "in",
          dpi = 900)
 )
+
+
+#4. Surface vs. DCM statistics for the 2023-07-17 profile in Figure 3 (reviewer response)####
+# What a sensor anywhere in 0-5 m would record vs. the 5.5-7 m DCM layer, from the same cast plotted in Fig. 3
+profile_20230717 <- plot_dat %>%
+  filter(FacetID == "2023-07-17", !is.na(ugL))
+
+layer_stats_20230717 <- bind_rows(
+  profile_20230717 %>% filter(Depth_m >= 0,   Depth_m <= 5) %>% mutate(layer = "0-5 m"),
+  profile_20230717 %>% filter(Depth_m >= 5.5, Depth_m <= 7) %>% mutate(layer = "5.5-7 m"),
+  profile_20230717 %>% mutate(layer = "Whole profile")
+) %>%
+  group_by(layer) %>%
+  summarise(
+    depth_min_m = min(Depth_m), depth_max_m = max(Depth_m), n_readings = n(),
+    mean_ugL = mean(ugL), median_ugL = median(ugL), min_ugL = min(ugL), max_ugL = max(ugL),
+    pct_readings_over_50 = 100 * mean(ugL > 50),
+    .groups = "drop"
+  )
+
+print(layer_stats_20230717, width = Inf)
+cat(sprintf("2023-07-17 peak: %.1f ug/L at %.2f m\n",
+            max(profile_20230717$ugL), profile_20230717$Depth_m[which.max(profile_20230717$ugL)]))

@@ -19,7 +19,7 @@
 required_objects <- c("full_met", "final_photic_thermo", "final_schmidt", "therm_for_plot", "variable_labels")
 missing_objects <- required_objects[!vapply(required_objects, exists, logical(1), inherits = TRUE)]
 if (length(missing_objects) > 0) {
-  stop("Missing required objects for 11_Visualize_final_chosen_variables.R: ",
+  stop("Missing required objects for 13_Visualize_final_chosen_variables.R: ",
        paste(missing_objects, collapse = ", "),
        ". Run 01_DataDownload.R and 01-10 in 02_Datawrangling first.")
 }

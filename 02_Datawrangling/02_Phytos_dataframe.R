@@ -663,7 +663,14 @@ sig_grid_upper_fn <- function(data, response_col, title_label, year_min = 2015) 
   # Kruskal–Wallis
   fml <- as.formula(paste(response_col, "~ Year"))
   kw <- kruskal.test(fml, data = df)
-  
+
+  # Kruskal–Wallis effect sizes: epsilon² = H / (n - 1); eta² = (H - k + 1) / (n - k)
+  n_kw <- sum(complete.cases(df[[response_col]], df$Year))  # same observations kruskal.test uses
+  cat(sprintf("%s: H = %.2f, df = %d, n = %d, p = %.3g, epsilon2 = %.3f, eta2 = %.3f\n",
+              response_col, kw$statistic, kw$parameter, n_kw, kw$p.value,
+              kw$statistic / (n_kw - 1),
+              (kw$statistic - kw$parameter) / (n_kw - kw$parameter - 1)))
+
   # Pairwise Wilcoxon (BH)
   resp_vec <- df[[response_col]]
   pw <- pairwise.wilcox.test(resp_vec, df$Year, p.adjust.method = "BH", exact = FALSE)

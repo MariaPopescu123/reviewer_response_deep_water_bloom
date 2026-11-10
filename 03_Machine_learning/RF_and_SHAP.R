@@ -18,7 +18,7 @@ missing_objects <- required_objects[!vapply(required_objects, exists, logical(1)
 if (length(missing_objects) > 0) {
   stop("Missing required objects for RF_and_SHAP.R: ",
        paste(missing_objects, collapse = ", "),
-       ". Run 01_DataDownload.R and 02_Datawrangling/09_join_all_frames.R first.")
+       ". Run 01_DataDownload.R and 02_Datawrangling/10_join_all_frames.R first.")
 }
 
 required_functions <- c("var_importance_shap_plots", "jackknife_incMSE_heatmap", "plot_shap_vs_value_loop")
@@ -296,3 +296,134 @@ figS10 <- plot_shap_vs_value_loop(
 ggsave(here::here("Figs","Supporting Information","Figure S10.png"),
        plot = figS10$panel_plot,
        width = 13, height = 7, dpi = 1200, bg = "white")
+
+
+
+#added Rohit's section here####
+#Rebuild the published forest exactly (same cleaning, set.seed(123) and grid order as var_importance_shap_plots()); stop if it differs from the forest behind Fig. 5
+rebuild_forest <- function(Xdataframe, response_var, published) {
+  d <- Xdataframe |> mutate(Year = year(as.Date(Date))) |> filter(Year >= 2015, Year <= 2024) |>
+    select(-Date, -Year) |> mutate(across(everything(), ~ ifelse(is.infinite(.x) | is.nan(.x), NA, .x)))
+  d <- d[, colMeans(is.na(d)) <= 0.25 | names(d) == response_var, drop = FALSE] |> drop_na()
+  f <- as.formula(paste(response_var, "~ ."))
+  grid <- expand.grid(mtry = seq_len(max(1, floor((ncol(d) - 1) / 2))), nodesize = c(2, 4, 6, 8),
+                      ntree = c(100, 200, 300, 500))
+  set.seed(123)
+  oob <- t(sapply(seq_len(nrow(grid)), function(i) {
+    fit <- randomForest(f, data = d, ntree = grid$ntree[i], mtry = grid$mtry[i],
+                        nodesize = grid$nodesize[i], importance = TRUE)
+    c(r2 = tail(fit$rsq, 1), mse = tail(fit$mse, 1))
+  }))
+  b <- grid[order(-oob[, "r2"], oob[, "mse"])[1], ]
+  fit <- randomForest(f, data = d, ntree = b$ntree, mtry = b$mtry, nodesize = b$nodesize, importance = TRUE)
+  imp <- randomForest::importance(fit, type = 1)[published$importance_table$Variable, 1]
+  if (!isTRUE(all.equal(unname(imp), published$importance_table$`%IncMSE`)))
+    stop("The rebuilt ", response_var, " forest differs from the published one")
+  list(fit = fit, X = d[, names(d) != response_var])
+}
+
+# One SHAP run as in the paper (fastshap, adjust = FALSE), with its own seed
+shap_run <- function(fit, X, nsim, seed) {
+  set.seed(seed)
+  s <- fastshap::explain(fit, X = X, nsim = nsim, adjust = FALSE,
+                         pred_wrapper = function(object, newdata) predict(object, newdata = newdata))
+  as.matrix(as.data.frame(unclass(s)))
+}
+
+# 3. Ten runs at each nsim, summarised without any reference run
+nsims  <- c(25, 50, 100, 200, 400)   # nsim values compared (same as Rohit's earlier version)
+n_runs <- 10                         # SHAP runs per nsim
+
+icc_1 <- function(M) {   # one-way ICC(1,1) of a single run; M = weeks x runs
+  k <- ncol(M); msb <- k * var(rowMeans(M)); msw <- sum((M - rowMeans(M))^2) / (nrow(M) * (k - 1))
+  (msb - msw) / (msb + (k - 1) * msw)
+}
+convergence <- function(rb, six, units, model) {
+  A <- lapply(nsims, function(ns)   # weeks x predictors x runs, one array per nsim
+    simplify2array(lapply(1:n_runs, function(r) shap_run(rb$fit, rb$X, ns, 300000 + ns * 100 + r))))
+  sd_runs <- sapply(A, function(a) apply(apply(a, 1:2, sd), 2, median))  # run-to-run SD, median over weeks
+  spread  <- sapply(A, function(a) apply(apply(a, 2:3, sd), 1, mean))    # SD across weeks, mean over runs
+  pct <- 100 * sd_runs / spread                                         # predictors x nsim
+  a100 <- A[[which(nsims == 100)]]; p <- dimnames(a100)[[2]]
+  imp  <- apply(abs(a100), 2:3, mean)                                   # mean |SHAP| per predictor and run
+  top6 <- apply(imp, 2, function(v) paste(sort(names(sort(v, decreasing = TRUE))[1:6]), collapse = ","))
+  per <- data.frame(model, predictor = p, label = unname(variable_labels[p]), in_fig_6_7 = p %in% six,
+                    variation_pct = pct[, nsims == 100],
+                    icc = sapply(p, function(j) icc_1(a100[, j, ])),
+                    min_pairwise_r = sapply(p, function(j) { r <- cor(a100[, j, ]); min(r[upper.tri(r)]) }),
+                    cv_mean_abs_shap_pct = 100 * apply(imp, 1, sd) / rowMeans(imp),
+                    slope = apply(sd_runs, 1, function(s) unname(coef(lm(log(s) ~ log(nsims)))[2])), row.names = NULL)
+  s6 <- per[per$in_fig_6_7, ]; j1 <- six[1]
+  list(table = apply(pct[six, , drop = FALSE], 2, function(v) sprintf("%.1f%% (%.1f%%)", median(v), max(v))),
+       per = per,
+       summary = data.frame(model,
+                       variation_median_pct = median(s6$variation_pct), variation_max_pct = max(s6$variation_pct),
+                       example_predictor = j1, example_run_to_run_sd = sd_runs[j1, nsims == 100],
+                       example_spread_across_weeks = spread[j1, nsims == 100], units,
+                       distinct_top6_sets = length(unique(top6)), min_pairwise_r = min(s6$min_pairwise_r),
+                       min_icc = min(s6$icc), max_cv_mean_abs_shap_pct = max(s6$cv_mean_abs_shap_pct),
+                       slope_median = median(per$slope)))
+}
+
+res <- list(
+  depth = convergence(rebuild_forest(depth_analysis_over20, "DCM_depth", finaldepthRF_over20),
+                      head(finaldepthRF_over20$var_order, 6), "m", "DCM depth"),
+  magnitude = convergence(rebuild_forest(magnitude_analysis, "max_conc", finalmagnitudeRF),
+                          head(finalmagnitudeRF$var_order, 6), "ug/L", "DCM magnitude"))
+
+# 4. Outputs
+out <- "Figs/Reviewer_C7"; dir.create(out, recursive = TRUE, showWarnings = FALSE)
+table_r1 <- data.frame(nsim = nsims, relative_computing_time = paste0(nsims / 100, "x"),
+                       DCM_depth_median_max = res$depth$table, DCM_magnitude_median_max = res$magnitude$table)
+summary_100 <- rbind(res$depth$summary, res$magnitude$summary)
+per_predictor <- rbind(res$depth$per, res$magnitude$per)
+write.csv(table_r1, file.path(out, "Table_R1.csv"), row.names = FALSE)
+write.csv(summary_100, file.path(out, "nsim100_summary.csv"), row.names = FALSE)
+write.csv(per_predictor, file.path(out, "per_predictor_nsim100.csv"), row.names = FALSE)
+print(table_r1, row.names = FALSE)
+print(t(summary_100))
+
+#### Supporting Information Table S2 (SHAP Monte Carlo convergence; Table R1 as a figure) ####
+s2_body <- data.frame(
+  nsim = as.character(table_r1$nsim),
+  time = sub("x$", "×", table_r1$relative_computing_time),
+  depth = table_r1$DCM_depth_median_max,
+  magnitude = table_r1$DCM_magnitude_median_max,
+  stringsAsFactors = FALSE
+)
+colnames(s2_body) <- c("Monte Carlo\nsimulations (nsim)", "Relative\ncomputing time",
+                       "DCM depth\nmodel", "DCM magnitude\nmodel")
+
+s2_row100 <- which(table_r1$nsim == 100)   # nsim used in the paper: bold + shaded
+s2_theme <- gridExtra::ttheme_minimal(
+  core = list(fg_params = list(fontsize = 10, hjust = 0.5, x = 0.5,
+                               fontface = ifelse(seq_len(nrow(s2_body)) == s2_row100, "bold", "plain")),
+              bg_params = list(fill = ifelse(seq_len(nrow(s2_body)) == s2_row100, "grey92", "white"), col = NA),
+              padding = unit(c(4, 3.2), "mm")),
+  colhead = list(fg_params = list(fontsize = 10, fontface = "bold", hjust = 0.5, x = 0.5),
+                 padding = unit(c(4, 3.2), "mm"))
+)
+s2_tbl <- gridExtra::tableGrob(s2_body, rows = NULL, theme = s2_theme)
+s2_W <- 7                                             # table width (in), equal columns
+s2_tbl$widths <- unit(rep(s2_W / 4, 4), "in")
+
+# Spanning header over the two model columns, then booktabs-style rules
+s2_tbl <- gtable::gtable_add_rows(s2_tbl, unit(11, "mm"), pos = 0)
+s2_tbl <- gtable::gtable_add_grob(
+  s2_tbl, grid::textGrob("Run-to-run variation in SHAP values\nmedian (maximum)",
+                         gp = grid::gpar(fontsize = 10, fontface = "bold", lineheight = 1.1)),
+  t = 1, l = 3, r = 4, clip = "off")
+s2_rule <- function(y, lwd) grid::segmentsGrob(0, y, 1, y, gp = grid::gpar(lwd = lwd))
+s2_tbl <- gtable::gtable_add_grob(s2_tbl, s2_rule(1, 2),   t = 1, l = 1, r = ncol(s2_tbl), name = "top_rule")
+s2_tbl <- gtable::gtable_add_grob(s2_tbl, grid::segmentsGrob(0.03, 0, 0.97, 0, gp = grid::gpar(lwd = 0.8)),
+                                  t = 1, l = 3, r = 4, name = "span_rule")
+s2_tbl <- gtable::gtable_add_grob(s2_tbl, s2_rule(0, 1.2), t = 2, l = 1, r = ncol(s2_tbl), name = "head_rule")
+s2_tbl <- gtable::gtable_add_grob(s2_tbl, s2_rule(0, 2),   t = nrow(s2_tbl), l = 1, r = ncol(s2_tbl), name = "bottom_rule")
+
+s2_H <- grid::convertHeight(sum(s2_tbl$heights), "in", valueOnly = TRUE)
+
+dir.create("Figs/Supporting Information", recursive = TRUE, showWarnings = FALSE)
+ggsave("Figs/Supporting Information/Table S2.png",
+       plot = gridExtra::arrangeGrob(s2_tbl, vp = grid::viewport(width = 0.94, height = 0.9)),
+       device = ragg::agg_png, width = s2_W / 0.94, height = s2_H / 0.9, units = "in", dpi = 600, bg = "white")
+

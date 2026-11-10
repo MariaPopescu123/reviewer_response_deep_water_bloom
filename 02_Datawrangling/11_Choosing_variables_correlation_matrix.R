@@ -4,12 +4,12 @@
 # 3) summarizes statistics for reporting
 #
 # Inputs:
-# - CSVs/full_data.csv (created by 09_join_all_frames.R)
+# - CSVs/full_data.csv (created by 10_join_all_frames.R)
 # - variable_labels object (created in 01_DataDownload.R)
 # Output figures will be written to: Figs/correlations/
 
 if (!exists("variable_labels", inherits = TRUE)) {
-  stop("variable_labels is missing. Run 01_DataDownload.R before 10_Choosing_variables_correlation_matrix.R.")
+  stop("variable_labels is missing. Run 01_DataDownload.R before 11_Choosing_variables_correlation_matrix.R.")
 }
 
 
@@ -68,6 +68,10 @@ plot_correlation_matrix <- function(df, file_name, cutoff = 0.6,
   # Build plot
   p <- ggplot(cor_long, aes(x = Var1, y = Var2, fill = Correlation, size = abs(Correlation))) +
     geom_tile(color = NA) +
+    # X over pairs with |rho| > cutoff (diagonal excluded)
+    geom_point(data = cor_long |> filter(abs(Correlation) > cutoff, Var1 != Var2),
+               aes(x = Var1, y = Var2), inherit.aes = FALSE,
+               shape = 4, size = 6 * scale_factor, stroke = 1.2 * scale_factor, color = "black") +
     scale_fill_gradient2(low = "red", mid = "white", high = "blue", midpoint = 0,
                          limits = c(-1, 1), name = "Correlation") +
     scale_size(range = c(2 * scale_factor, 12 * scale_factor), guide = "none") +
@@ -103,7 +107,7 @@ plot_correlation_matrix <- function(df, file_name, cutoff = 0.6,
 full_data <- full_data|>
   select(
     "Date", "WaterLevel_m", "DCM_depth", "max_conc",
-     "PZ","PZ_prop","thermocline_depth", "schmidt_stability",
+     "PZ","PZ_prop","thermocline_depth", "schmidt_stability", "log_wedderburn",
     "surface_temp", "temp_at_DCM",
      "N_at_DCM", "depth_SRP_ugL_max", "SRP_ugL_at_DCM",
     "depth_NH4_ugL_max", "NH4_ugL_at_DCM", "depth_NO3NO2_ugL_max", "NO3NO2_ugL_at_DCM",
@@ -189,3 +193,14 @@ ggsave(
 # For DCM magnitude: N_at_DCM + schmidt stability are most correlated w DCM magnitude and
 # have low collinearity
 
+
+#### Reviewer response: how correlated are DCM depth and DCM magnitude? ####
+# Spearman, matching the correlation matrices above; shown for all weeks and for the
+# max_conc > 20 ug/L weeks used in the DCM depth random forest model
+for (sub in c("all weeks", "max_conc > 20")) {
+  dd <- full_data[complete.cases(full_data$DCM_depth, full_data$max_conc), ]
+  if (sub == "max_conc > 20") dd <- dd[dd$max_conc > 20, ]
+  ct <- cor.test(dd$DCM_depth, dd$max_conc, method = "spearman", exact = FALSE)
+  cat(sprintf("DCM depth vs. DCM magnitude (%s): Spearman rho = %.2f, p = %.3g, n = %d\n",
+              sub, ct$estimate, ct$p.value, nrow(dd)))
+}
